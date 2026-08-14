@@ -45,6 +45,20 @@ Este é o serviço de CRUD (Create, Read, Update, Delete) do projeto ToggleMaste
     ```
     O servidor estará rodando em `http://localhost:8002`.
 
+## ✅ Qualidade e testes
+
+Instale as dependências de desenvolvimento e execute as verificações locais:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+docker build -t togglemaster-flag-service .
+```
+
+O workflow `.github/workflows/ci.yml` executa lint e testes unitários em cada push e pull
+request. Após essas verificações, ele também valida o build da imagem Docker.
+
 ## 🧪 Testando os Endpoints
 
 **Primeiro, você precisa de uma chave de API válida!**
