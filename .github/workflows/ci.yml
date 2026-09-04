@@ -1,46 +1,220 @@
-name: CI
+name: Flag Service DevSecOps
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: flag-service-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 935091649608.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: togglemaster-homolog/flag-service
+  GITOPS_REPOSITORY: devjean96/togglemaster-gitops
+
 jobs:
-  quality:
-    name: Tests and lint
+  build-test:
+    name: Build and unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
         run: python -m pip install --upgrade pip -r requirements-dev.txt
 
-      - name: Run lint
-        run: ruff check .
-
       - name: Run unit tests
         run: pytest
 
-  build:
-    name: Build Docker image
+      - name: Build application
+        run: python -m compileall -q app.py
+
+  lint:
+    name: Linter and static analysis
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: quality
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Build application image
-        run: docker build --tag togglemaster-flag-service:${{ github.sha }} .
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install lint dependencies
+        run: python -m pip install --upgrade pip -r requirements-dev.txt
+
+      - name: Run Ruff
+        run: ruff check .
+
+  security:
+    name: Security scan (SAST and SCA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: python -m pip install --disable-pip-version-check bandit==1.8.6
+
+      - name: Run SAST with Bandit
+        run: bandit -r app.py -lll -ii
+
+      - name: Run SCA with Trivy and block critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: false
+          format: table
+
+  container:
+    name: Build, scan and publish container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - build-test
+      - lint
+      - security
+    outputs:
+      image_tag: ${{ steps.image.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Define immutable image tag
+        id: image
+        shell: bash
+        run: |
+          image_tag="sha-${GITHUB_SHA:0:12}"
+          echo "tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "local_image=togglemaster-flag-service:$image_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: docker build --tag "${{ steps.image.outputs.local_image }}" .
+
+      - name: Scan container and block critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image.outputs.local_image }}
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: false
+          format: table
+
+      - name: Configure AWS Academy credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Log in to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2.1.6
+
+      - name: Verify Terraform-managed ECR repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null
+
+      - name: Push immutable image to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          LOCAL_IMAGE: ${{ steps.image.outputs.local_image }}
+        run: |
+          remote_image="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker tag "$LOCAL_IMAGE" "$remote_image"
+          docker push "$remote_image"
+          echo "Published $remote_image" >> "$GITHUB_STEP_SUMMARY"
+
+  update-gitops:
+    name: Update GitOps image tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: container
+
+    steps:
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GITOPS_REPOSITORY }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          ref: main
+          path: gitops
+
+      - name: Update homolog image reference
+        env:
+          IMAGE_TAG: ${{ needs.container.outputs.image_tag }}
+        shell: bash
+        run: |
+          overlay="gitops/apps/flag/overlays/homolog/kustomization.yaml"
+
+          if [[ ! "$ECR_REGISTRY" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$ ]]; then
+            echo "::error::ECR_REGISTRY is missing or invalid."
+            exit 1
+          fi
+
+          sed -i "s|^[[:space:]]*newName:.*|    newName: $ECR_REGISTRY/$ECR_REPOSITORY|" "$overlay"
+          sed -i "s|^[[:space:]]*newTag:.*|    newTag: $IMAGE_TAG|" "$overlay"
+
+          grep -F "newName: $ECR_REGISTRY/$ECR_REPOSITORY" "$overlay"
+          grep -F "newTag: $IMAGE_TAG" "$overlay"
+
+      - name: Commit GitOps change
+        env:
+          IMAGE_TAG: ${{ needs.container.outputs.image_tag }}
+        shell: bash
+        run: |
+          git -C gitops config user.name "togglemaster-ci"
+          git -C gitops config user.email "togglemaster-ci@users.noreply.github.com"
+          git -C gitops add apps/flag/overlays/homolog/kustomization.yaml
+
+          if git -C gitops diff --cached --quiet; then
+            echo "GitOps already references $IMAGE_TAG"
+            exit 0
+          fi
+
+          git -C gitops commit -m "chore(flag): deploy $IMAGE_TAG to homolog"
+          git -C gitops push origin HEAD:main
