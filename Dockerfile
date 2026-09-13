@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim
+FROM python:3.11-alpine3.23
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +12,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
-    && adduser --disabled-password --gecos "" app
+    && addgroup -S app \
+    && adduser -S -G app app
 
 COPY . .
 
