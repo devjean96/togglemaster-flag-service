@@ -198,9 +198,11 @@ jobs:
 
           sed -i "s|^[[:space:]]*newName:.*|    newName: $ECR_REGISTRY/$ECR_REPOSITORY|" "$overlay"
           sed -i "s|^[[:space:]]*newTag:.*|    newTag: $IMAGE_TAG|" "$overlay"
+          sed -i "s|^[[:space:]]*app.kubernetes.io/version:.*|      app.kubernetes.io/version: $IMAGE_TAG|" "$overlay"
 
           grep -F "newName: $ECR_REGISTRY/$ECR_REPOSITORY" "$overlay"
           grep -F "newTag: $IMAGE_TAG" "$overlay"
+          grep -F "app.kubernetes.io/version: $IMAGE_TAG" "$overlay"
 
       - name: Commit GitOps change
         env:
