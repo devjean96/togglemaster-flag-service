@@ -119,3 +119,14 @@ curl -X PUT http://localhost:8002/flags/enable-new-dashboard \
 ```
 Saída esperada: (O JSON da flag atualizada, com `"is_enabled": false`).
 
+## OpenTelemetry e New Relic APM
+
+O SDK é inicializado uma vez em cada worker Gunicorn. Flask, Requests e
+Psycopg2 são instrumentados automaticamente, enquanto operações de negócio de
+feature flags produzem spans e métricas próprios. A chamada ao `auth-service`
+propaga W3C Trace Context sem capturar o header `Authorization`.
+
+As variáveis `OTEL_*`, incluindo `service.version`, são entregues pelos
+manifests GitOps. Defina `OTEL_SDK_DISABLED=true` somente quando precisar
+desativar totalmente o SDK em testes ou diagnósticos locais.
+

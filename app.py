@@ -8,6 +8,10 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from functools import wraps
 import logging
+from opentelemetry import metrics, trace
+from opentelemetry.trace import Status, StatusCode
+
+from telemetry import init_telemetry
 
 # Configura o logging
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +21,20 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
+init_telemetry(app, default_service_name="flag-service")
+
+tracer = trace.get_tracer("togglemaster/flag-service")
+meter = metrics.get_meter("togglemaster/flag-service")
+operation_counter = meter.create_counter(
+    "togglemaster.feature_flag.operations",
+    unit="1",
+    description="Operações realizadas sobre feature flags",
+)
+auth_counter = meter.create_counter(
+    "togglemaster.feature_flag.auth_checks",
+    unit="1",
+    description="Validações de autenticação solicitadas pelo flag-service",
+)
 
 # --- Configuração ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -44,6 +62,7 @@ def require_auth(f):
     def decorated(*args, **kwargs):
         auth_header = request.headers.get("Authorization")
         if not auth_header:
+            auth_counter.add(1, {"auth.result": "missing_credentials"})
             return jsonify({"error": "Authorization header obrigatório"}), 401
 
         try:
@@ -52,15 +71,20 @@ def require_auth(f):
             response = requests.get(validate_url, headers={"Authorization": auth_header}, timeout=3)
 
             if response.status_code != 200:
+                auth_counter.add(1, {"auth.result": "invalid"})
                 log.warning(f"Falha na validação da chave (status: {response.status_code})")
                 return jsonify({"error": "Chave de API inválida"}), 401
 
+            auth_counter.add(1, {"auth.result": "valid"})
+
         except requests.exceptions.Timeout:
+            auth_counter.add(1, {"auth.result": "timeout"})
             log.error("Timeout ao conectar com o auth-service")
             return jsonify(
                 {"error": "Serviço de autenticação indisponível (timeout)"}
             ), 504  # Gateway Timeout
         except requests.exceptions.RequestException as e:
+            auth_counter.add(1, {"auth.result": "unavailable"})
             log.error(f"Erro ao conectar com o auth-service: {e}")
             return jsonify(
                 {"error": "Serviço de autenticação indisponível"}
@@ -70,6 +94,44 @@ def require_auth(f):
         return f(*args, **kwargs)
 
     return decorated
+
+
+def observe_flag_operation(operation):
+    """Cria um span de negócio sem registrar payloads ou credenciais."""
+
+    def decorator(f):
+        @wraps(f)
+        def observed(*args, **kwargs):
+            with tracer.start_as_current_span(f"feature_flag.{operation}") as span:
+                if "name" in kwargs:
+                    span.set_attribute("feature_flag.name", kwargs["name"])
+                try:
+                    response = f(*args, **kwargs)
+                    status_code = (
+                        response[1]
+                        if isinstance(response, tuple) and len(response) > 1
+                        else getattr(response, "status_code", 200)
+                    )
+                    span.set_attribute("feature_flag.operation", operation)
+                    span.set_attribute("http.response.status_code", status_code)
+                    operation_counter.add(
+                        1,
+                        {
+                            "feature_flag.operation": operation,
+                            "http.response.status_code": status_code,
+                        },
+                    )
+                    if status_code >= 500:
+                        span.set_status(Status(StatusCode.ERROR, "operation failed"))
+                    return response
+                except Exception as error:
+                    span.record_exception(error)
+                    span.set_status(Status(StatusCode.ERROR, "unhandled operation error"))
+                    raise
+
+        return observed
+
+    return decorator
 
 
 # --- Endpoints da API ---
@@ -82,6 +144,7 @@ def health():
 
 @app.route("/flags", methods=["POST"])
 @require_auth
+@observe_flag_operation("create")
 def create_flag():
     """Cria uma nova definição de feature flag"""
     data = request.get_json()
@@ -125,6 +188,7 @@ def create_flag():
 
 @app.route("/flags", methods=["GET"])
 @require_auth
+@observe_flag_operation("list")
 def get_flags():
     """Lista todas as feature flags"""
     conn = None
@@ -147,6 +211,7 @@ def get_flags():
 
 @app.route("/flags/<string:name>", methods=["GET"])
 @require_auth
+@observe_flag_operation("get")
 def get_flag(name):
     """Busca uma feature flag específica pelo nome"""
     conn = None
@@ -171,6 +236,7 @@ def get_flag(name):
 
 @app.route("/flags/<string:name>", methods=["PUT"])
 @require_auth
+@observe_flag_operation("update")
 def update_flag(name):
     """Atualiza uma feature flag (descrição ou status 'is_enabled')"""
     data = request.get_json()
@@ -225,6 +291,7 @@ def update_flag(name):
 
 @app.route("/flags/<string:name>", methods=["DELETE"])
 @require_auth
+@observe_flag_operation("delete")
 def delete_flag(name):
     """Deleta uma feature flag"""
     conn = None

@@ -9,6 +9,7 @@ import pytest
 def app_module(monkeypatch_session):
     monkeypatch_session.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
     monkeypatch_session.setenv("AUTH_SERVICE_URL", "http://auth-service")
+    monkeypatch_session.setenv("OTEL_SDK_DISABLED", "true")
 
     import psycopg2.pool
 
