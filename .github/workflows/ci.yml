@@ -19,6 +19,8 @@ concurrency:
 
 env:
   AWS_REGION: ${{ github.ref == 'refs/heads/feat/aws-temporary-demo' && 'us-east-2' || 'us-east-1' }}
+  PERSONAL_DEMO_AWS_ACCOUNT_ID: "335924543883"
+  PERSONAL_DEMO_DEPLOY_ROLE_ARN: arn:aws:iam::335924543883:role/ToggleMasterServiceDeployRole
   ECR_REPOSITORY: togglemaster-homolog/flag-service
   GITOPS_REPOSITORY: devjean96/togglemaster-gitops
 
@@ -139,8 +141,22 @@ jobs:
           ignore-unfixed: false
           format: table
 
-      - name: Configure AWS credentials
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      - name: Configure personal-demo AWS credentials
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feat/aws-temporary-demo'
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ env.PERSONAL_DEMO_DEPLOY_ROLE_ARN }}
+          role-session-name: togglemaster-${{ github.run_id }}-deploy
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+          allowed-account-ids: ${{ env.PERSONAL_DEMO_AWS_ACCOUNT_ID }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Configure AWS Academy credentials
+        if: (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/feat/aws-temporary-demo') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
