@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feat/aws-temporary-demo
   pull_request:
     branches:
       - main
