@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ github.ref == 'refs/heads/feat/aws-temporary-demo' && 'us-east-2' || 'us-east-1' }}
   ECR_REPOSITORY: togglemaster-homolog/flag-service
   GITOPS_REPOSITORY: devjean96/togglemaster-gitops
 
